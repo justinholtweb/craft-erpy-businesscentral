@@ -1,0 +1,54 @@
+{
+    "name": "justinholtweb/craft-erpy-businesscentral",
+    "description": "Microsoft Dynamics 365 Business Central connector for Erpy.",
+    "version": "5.0.0",
+    "type": "craft-plugin",
+    "keywords": [
+        "craftcms",
+        "craft-plugin",
+        "craft-commerce",
+        "erpy",
+        "erp",
+        "dynamics",
+        "business-central",
+        "microsoft",
+        "integration"
+    ],
+    "license": "proprietary",
+    "authors": [
+        {
+            "name": "Justin Holt",
+            "homepage": "https://justinholt.com"
+        }
+    ],
+    "support": {
+        "email": "justin@justinholt.com"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "require": {
+        "php": "^8.2",
+        "craftcms/cms": "^5.3.0",
+        "justinholtweb/craft-erpy": "^5.0.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "justinholtweb\\erpybusinesscentral\\": "src/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "craftcms/plugin-installer": true,
+            "yiisoft/yii2-composer": true
+        }
+    },
+    "extra": {
+        "name": "Erpy for Business Central",
+        "handle": "erpy-businesscentral",
+        "developer": "Justin Holt",
+        "developerUrl": "https://justinholt.com",
+        "documentationUrl": "https://github.com/justinholtweb/craft-erpy-businesscentral/blob/main/README.md",
+        "changelogUrl": "https://raw.githubusercontent.com/justinholtweb/craft-erpy-businesscentral/main/CHANGELOG.md",
+        "class": "justinholtweb\\erpybusinesscentral\\Plugin"
+    }
+}
