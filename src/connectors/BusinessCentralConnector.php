@@ -458,10 +458,10 @@ class BusinessCentralConnector extends Connector
         // Business Central has no idempotency key, so the external document number does the job:
         // it is indexed, it is what the merchant will search for, and asking first is far cheaper
         // than explaining a duplicate order to a warehouse.
-        $existing = $this->findOrderByExternalNumber($document->orderNumber);
+        $existing = $this->findOrderByExternalNumber($this->externalDocumentNumber($document->orderNumber));
 
         if ($existing !== null && $remoteId === null) {
-            return PushResult::alreadyExists((string)$existing['id'], (string)($existing['number'] ?? ''));
+            return PushResult::alreadyExists((string)($existing['id'] ?? ''), (string)($existing['number'] ?? ''));
         }
 
         if ($document->customerCode === null || $document->customerCode === '') {
@@ -470,7 +470,7 @@ class BusinessCentralConnector extends Connector
 
         $payload = array_filter([
             'customerNumber' => $document->customerCode,
-            'externalDocumentNumber' => mb_substr($document->orderNumber, 0, 35),
+            'externalDocumentNumber' => $this->externalDocumentNumber($document->orderNumber),
             'orderDate' => $document->orderedAt?->format('Y-m-d'),
             'currencyCode' => $document->currency,
             'billToName' => $document->billingAddress?->fullName,
@@ -545,6 +545,20 @@ class BusinessCentralConnector extends Connector
         ], static fn($value) => $value !== null && $value !== '');
     }
 
+    /**
+     * The value written to `externalDocumentNumber`, looked up by a retry and compared against
+     * what comes back: the Commerce number, cut to the field's 35 characters.
+     */
+    private function externalDocumentNumber(string $orderNumber): string
+    {
+        return mb_substr($orderNumber, 0, 35);
+    }
+
+    /**
+     * The sales order already carrying this external document number, or null. Every returned
+     * row is compared as well as filtered for: an API page that ignores or mis-applies `$filter`
+     * must not turn every order after the first into a duplicate of whatever it returned.
+     */
     private function findOrderByExternalNumber(string $number): ?array
     {
         $company = $this->company();
@@ -556,12 +570,18 @@ class BusinessCentralConnector extends Connector
         $response = $this->transport()->get("companies($company)/salesOrders", [
             '$filter' => sprintf("externalDocumentNumber eq '%s'", $this->escape($number)),
             '$select' => 'id,number,externalDocumentNumber',
-            '$top' => 1,
+            '$top' => 20,
         ]);
 
         $rows = $response->ok() ? $response->at('value', []) : [];
 
-        return $rows[0] ?? null;
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            if (is_array($row) && (string)($row['externalDocumentNumber'] ?? '') === $number) {
+                return $row;
+            }
+        }
+
+        return null;
     }
 
     private function rejectionOrFailure($response): PushResult
