@@ -40,6 +40,21 @@ use justinholtweb\erpy\models\canonical\ErpStock;
  * tracking numbers — those live on pages Microsoft has never surfaced. Both are therefore
  * optional endpoint settings here, and both say so plainly rather than silently returning
  * nothing.
+ *
+ * A posted shipment page is delta-synced on `lastModifiedDateTime` (the record's
+ * `SystemModifiedAt`), not `postingDate`. Posting is when a shipment is born, but the tracking
+ * number is routinely added afterwards with *Update Document*, which leaves the posting date alone
+ * — a filter on it would never see the one change the sync exists for.
+ *
+ * Credit limit is on the standard `customers` page as `creditLimit`; `customerFinancialDetails`
+ * carries the balance and overdue amount but no limit, which is why credit reads the customer and
+ * expands its financial detail rather than the other way round. A limit of 0 is Business Central
+ * for "no limit", not "no credit".
+ *
+ * There is no webhook support. Business Central's change notifications are API subscriptions
+ * that open with a `validationToken` handshake and carry their secret as `clientState` in the
+ * body, and Erpy's webhook endpoint answers neither — offering a webhook secret here would be a
+ * setting that can never work.
  */
 class BusinessCentralConnector extends Connector
 {
@@ -128,15 +143,7 @@ class BusinessCentralConnector extends Connector
             ]),
             Field::text('shipmentsEndpoint', Craft::t('erpy', 'Posted shipments endpoint'), [
                 'placeholder' => 'salesShipments',
-                'instructions' => Craft::t('erpy', 'Relative to the company. Must expose orderNo, no, and optionally packageTrackingNo, shippingAgentCode and postingDate.'),
-            ]),
-            Field::text('creditLimitField', Craft::t('erpy', 'Credit limit field'), [
-                'instructions' => Craft::t('erpy', 'If you have surfaced Credit Limit (LCY) on your customers API page, name the field here.'),
-                'placeholder' => 'creditLimitLcy',
-            ]),
-            Field::text('webhookSecret', Craft::t('erpy', 'Webhook secret'), [
-                'secret' => true,
-                'instructions' => Craft::t('erpy', 'Only needed if you push change notifications to Erpy rather than letting it poll.'),
+                'instructions' => Craft::t('erpy', 'Relative to the company. Must expose orderNo, no and lastModifiedDateTime (the record’s SystemModifiedAt, which delta syncs filter on), and optionally externalDocumentNo, packageTrackingNo, shippingAgentCode and postingDate.'),
             ]),
         ];
     }
@@ -254,9 +261,7 @@ class BusinessCentralConnector extends Connector
 
     protected function fetchCustomers(FetchCriteria $criteria): Page
     {
-        $creditLimitField = (string)$this->setting('creditLimitField', '');
-
-        return $this->page('customers', $criteria, Entity::CUSTOMER, function(array $row) use ($creditLimitField): ErpCustomer {
+        return $this->page('customers', $criteria, Entity::CUSTOMER, function(array $row): ErpCustomer {
             $address = new ErpAddress([
                 'type' => ErpAddress::TYPE_BILLING,
                 'fullName' => (string)($row['displayName'] ?? ''),
@@ -285,10 +290,8 @@ class BusinessCentralConnector extends Connector
                 'currency' => $row['currencyCode'] ?: null,
                 'paymentTermsCode' => $row['paymentTermsId'] ?: null,
                 'shippingMethodCode' => $row['shipmentMethodId'] ?: null,
-                'balance' => isset($row['balance']) ? (float)$row['balance'] : null,
-                'creditLimit' => ($creditLimitField !== '' && isset($row[$creditLimitField]))
-                    ? (float)$row[$creditLimitField]
-                    : null,
+                'balance' => isset($row['balanceDue']) ? (float)$row['balanceDue'] : null,
+                'creditLimit' => $this->creditLimit($row),
                 'addresses' => $address->isEmpty() ? [] : [$address],
                 'remoteId' => (string)($row['id'] ?? ''),
                 'remoteKey' => (string)($row['number'] ?? ''),
@@ -300,20 +303,36 @@ class BusinessCentralConnector extends Connector
 
     protected function fetchCredit(FetchCriteria $criteria): Page
     {
-        $creditLimitField = (string)$this->setting('creditLimitField', '');
+        // The limit lives on the customer and the overdue figure on its financial detail, so this
+        // reads the one and expands the other. No delta: a payment moves the balance without
+        // touching the customer's lastModifiedDateTime, so a modified-since read would miss it.
+        return $this->page('customers', $criteria, Entity::CREDIT, function(array $row): ErpCredit {
+            $financial = is_array($row['customerFinancialDetail'] ?? null) ? $row['customerFinancialDetail'] : [];
+            $blocked = (string)($row['blocked'] ?? '');
 
-        return $this->page('customerFinancialDetails', $criteria, Entity::CREDIT, function(array $row) use ($creditLimitField): ErpCredit {
             return new ErpCredit([
                 'customerCode' => (string)($row['number'] ?? ''),
-                'balance' => (float)($row['balance'] ?? 0),
-                'overdueAmount' => (float)($row['overdueAmount'] ?? 0),
-                'creditLimit' => ($creditLimitField !== '' && isset($row[$creditLimitField]))
-                    ? (float)$row[$creditLimitField]
-                    : null,
+                'currency' => (string)(($row['currencyCode'] ?? '') ?: 'USD'),
+                'creditLimit' => $this->creditLimit($row),
+                'balance' => (float)($financial['balance'] ?? $row['balanceDue'] ?? 0),
+                'overdueAmount' => (float)($financial['overdueAmount'] ?? 0),
+                'onHold' => !in_array($blocked, ['', ' '], true),
                 'remoteId' => (string)($row['id'] ?? ''),
                 'raw' => $row,
             ]);
-        }, deltaField: null);
+        }, deltaField: null, select: 'id,number,currencyCode,balanceDue,creditLimit,blocked', expand: 'customerFinancialDetail');
+    }
+
+    /**
+     * Business Central's `creditLimit`, with its 0 read as what it means there: no limit set.
+     * Treating it as a limit of zero would refuse every on-account order from every customer who
+     * was never given one.
+     */
+    private function creditLimit(array $row): ?float
+    {
+        $limit = isset($row['creditLimit']) ? (float)$row['creditLimit'] : null;
+
+        return $limit !== null && $limit > 0 ? $limit : null;
     }
 
     protected function fetchPrices(FetchCriteria $criteria): Page
@@ -387,9 +406,10 @@ class BusinessCentralConnector extends Connector
                 'service' => $row['shippingAgentServiceCode'] ?? null,
                 'shippedAt' => $this->date($row['postingDate'] ?? null),
                 'remoteId' => (string)($row['id'] ?? ''),
+                'modifiedAt' => $this->date($row['lastModifiedDateTime'] ?? null),
                 'raw' => $row,
             ]);
-        }, deltaField: null);
+        });
     }
 
     protected function fetchInvoices(FetchCriteria $criteria): Page
@@ -567,6 +587,7 @@ class BusinessCentralConnector extends Connector
         callable $make,
         ?string $deltaField = 'lastModifiedDateTime',
         ?string $select = null,
+        ?string $expand = null,
     ): Page {
         $company = $this->company();
 
@@ -583,6 +604,10 @@ class BusinessCentralConnector extends Connector
 
             if ($select !== null) {
                 $query['$select'] = $select;
+            }
+
+            if ($expand !== null) {
+                $query['$expand'] = $expand;
             }
 
             $filters = [];
